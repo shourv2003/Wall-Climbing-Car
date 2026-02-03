@@ -1,0 +1,203 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+/*
+  ESP8266 (NodeMCU/Wemos D1 mini) + L298N + 4 DC motors (2 motors per side in parallel)
+
+  WIRING (ESP8266 -> L298N):
+  IN1 = GPIO5  (D1)
+  IN2 = GPIO4  (D2)
+  IN3 = GPIO0  (D3)
+  IN4 = GPIO2  (D4)
+  ENA = GPIO14 (D5)  PWM
+  ENB = GPIO12 (D6)  PWM
+
+  Motors:
+  Left 2 motors in parallel -> L298N OUT1/OUT2
+  Right 2 motors in parallel -> L298N OUT3/OUT4
+
+  Power:
+  Motor battery to L298N +12V & GND
+  ESP8266 GND must connect to L298N GND
+*/
+
+const uint8_t IN1 = 5;    // D1
+const uint8_t IN2 = 4;    // D2
+const uint8_t IN3 = 0;    // D3
+const uint8_t IN4 = 2;    // D4
+const uint8_t ENA = 14;   // D5 PWM
+const uint8_t ENB = 12;   // D6 PWM
+
+ESP8266WebServer server(80);
+
+// AP WiFi (phone will connect to this)
+const char* AP_SSID = "ESP_CAR";
+const char* AP_PASS = "12345678";   // must be >= 8 chars
+
+int speedVal = 800; // 0-1023 (ESP8266 PWM range)
+
+// ---------- Motor control ----------
+void setPWM(int spd) {
+  spd = constrain(spd, 0, 1023);
+  speedVal = spd;
+  analogWrite(ENA, speedVal);
+  analogWrite(ENB, speedVal);
+}
+
+void stopCar() {
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+}
+
+void forward() {
+  setPWM(speedVal);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void backward() {
+  setPWM(speedVal);
+  digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
+}
+
+void left() {
+  setPWM(speedVal);
+  // Left side stop, Right side forward
+  digitalWrite(IN1, LOW);  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void right() {
+  setPWM(speedVal);
+  // Right side stop, Left side forward
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, LOW);
+}
+
+// ---------- Web page ----------
+String htmlPage() {
+  return R"rawliteral(
+<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP8266 Car</title>
+  <style>
+    body{font-family:Arial;text-align:center;margin:0;padding:18px;background:#fafafa;}
+    .card{display:inline-block;padding:16px 18px;border:1px solid #ddd;border-radius:16px;background:#fff;}
+    .btn{width:120px;height:60px;font-size:18px;margin:8px;border-radius:14px;border:1px solid #ccc;background:#f3f3f3;}
+    .btn:active{transform:scale(0.98);}
+    .row{display:flex;justify-content:center;align-items:center;}
+    input[type=range]{width:260px;}
+    .hint{font-size:12px;color:#555;margin-top:10px;}
+  </style>
+</head>
+<body>
+  <h2>ESP8266 WiFi Car Controller</h2>
+
+  <div class="card">
+    <div class="row">
+      <button class="btn" onclick="sendCmd('F')">Forward</button>
+    </div>
+
+    <div class="row">
+      <button class="btn" onclick="sendCmd('L')">Left</button>
+      <button class="btn" onclick="sendCmd('S')">Stop</button>
+      <button class="btn" onclick="sendCmd('R')">Right</button>
+    </div>
+
+    <div class="row">
+      <button class="btn" onclick="sendCmd('B')">Backward</button>
+    </div>
+
+    <p><b>Speed:</b> <span id="sp">800</span></p>
+    <input id="speed" type="range" min="0" max="1023" value="800" oninput="setSpeed(this.value)">
+
+    <div class="hint">
+      Connect WiFi: <b>ESP_CAR</b> (pass: <b>12345678</b>)<br>
+      Open: <b>192.168.4.1</b>
+    </div>
+  </div>
+
+<script>
+function sendCmd(c){
+  fetch('/cmd?go=' + c).catch(()=>{});
+}
+
+function setSpeed(v){
+  document.getElementById('sp').innerText = v;
+  fetch('/speed?val=' + v).catch(()=>{});
+}
+</script>
+</body>
+</html>
+)rawliteral";
+}
+
+// ---------- HTTP handlers ----------
+void handleRoot() {
+  server.send(200, "text/html", htmlPage());
+}
+
+void handleCmd() {
+  if (!server.hasArg("go")) {
+    server.send(400, "text/plain", "Missing go");
+    return;
+  }
+  String g = server.arg("go");
+
+  if (g == "F") forward();
+  else if (g == "B") backward();
+  else if (g == "L") left();
+  else if (g == "R") right();
+  else stopCar();
+
+  server.send(200, "text/plain", "OK");
+}
+
+void handleSpeed() {
+  if (!server.hasArg("val")) {
+    server.send(400, "text/plain", "Missing val");
+    return;
+  }
+  int v = server.arg("val").toInt();
+  setPWM(v);
+  server.send(200, "text/plain", "SPEED=" + String(speedVal));
+}
+
+void handleNotFound() {
+  server.send(404, "text/plain", "Not found");
+}
+
+// ---------- Setup ----------
+void setup() {
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT); pinMode(ENB, OUTPUT);
+
+  stopCar();
+
+  // PWM frequency (optional)
+  analogWriteFreq(1000);
+
+  // Start WiFi Access Point
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASS);
+
+  // Routes
+  server.on("/", handleRoot);
+  server.on("/cmd", handleCmd);
+  server.on("/speed", handleSpeed);
+  server.onNotFound(handleNotFound);
+
+  server.begin();
+}
+
+// ---------- Loop ----------
+void loop() {
+  server.handleClient();
+}
